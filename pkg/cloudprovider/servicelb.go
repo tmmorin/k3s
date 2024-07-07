@@ -52,7 +52,7 @@ const (
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.7"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.8"
 )
 
 func (k *k3s) Register(ctx context.Context,
