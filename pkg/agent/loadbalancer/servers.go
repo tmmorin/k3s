@@ -63,9 +63,11 @@ func (lb *LoadBalancer) setServers(serverAddresses []string) bool {
 	if len(serverAddresses) == 0 {
 		return false
 	}
-
+	logrus.Debugf("lb.setServers %s (before lock): %s [hasOriginalServer:%t]",lb.serviceName, serverAddresses, hasOriginalServer)
+	lockRequestTime := time.Now()
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
+	logrus.Debugf("lb.setServers %s (after lock, locked during %s): %s [hasOriginalServer:%t]",lb.serviceName, time.Since(lockRequestTime), serverAddresses, hasOriginalServer)
 
 	newAddresses := sets.NewString(serverAddresses...)
 	curAddresses := sets.NewString(lb.ServerAddresses...)
@@ -78,7 +80,10 @@ func (lb *LoadBalancer) setServers(serverAddresses []string) bool {
 		lb.servers[addedServer] = &server{
 			address:     addedServer,
 			connections: make(map[net.Conn]struct{}),
-			healthCheck: func() bool { return true },
+			healthCheck: func() bool { 
+				logrus.Debugf("HC return true %s (set from setServers)", addedServer)
+				return true
+			},
 		}
 	}
 
@@ -92,7 +97,10 @@ func (lb *LoadBalancer) setServers(serverAddresses []string) bool {
 			defer server.closeAll()
 			// Don't delete the default server from the server map, in case we need to fall back to it.
 			if removedServer != lb.defaultServerAddress {
+				logrus.Debugf("setServers %s, removing default %s from lb.servers", lb.serviceName, removedServer)
 				delete(lb.servers, removedServer)
+			} else {
+				logrus.Debugf("setServers %s, *not* removing default %s", lb.serviceName, removedServer)
 			}
 		}
 	}
@@ -108,12 +116,18 @@ func (lb *LoadBalancer) setServers(serverAddresses []string) bool {
 	lb.currentServerAddress = lb.randomServers[0]
 	lb.nextServerIndex = 1
 
+	logrus.Debugf("setServers %s: randomServers:%s, serverAddresses:%s currentServerAddress:%s nextServerIndex:%d",
+	            lb.serviceName, lb.randomServers, lb.ServerAddresses, lb.currentServerAddress, lb.nextServerIndex)
+
 	return true
 }
 
 func (lb *LoadBalancer) nextServer(failedServer string) (string, error) {
+	logrus.Debugf("lb.nextServer %s (before lock): failedServer:%s", lb.serviceName, failedServer)
+	lockRequestTime := time.Now()
 	lb.mutex.RLock()
 	defer lb.mutex.RUnlock()
+	logrus.Debugf("lb.nextServer %s (after lock, locked during %s): failedServer:%s", lb.serviceName, time.Since(lockRequestTime), failedServer)
 
 	// note: these fields are not protected by the mutex, so we clamp the index value and update
 	// the index/current address using local variables, to avoid time-of-check vs time-of-use
@@ -123,12 +137,15 @@ func (lb *LoadBalancer) nextServer(failedServer string) (string, error) {
 	nextServerIndex := lb.nextServerIndex
 
 	if len(lb.randomServers) == 0 {
+		logrus.Debugf("lb.%s nextServer: direct return len 1", lb.serviceName)
 		return "", errors.New("No servers in load balancer proxy list")
 	}
 	if len(lb.randomServers) == 1 {
+		logrus.Debugf("lb.%s nextServer: direct return len 1", lb.serviceName)
 		return currentServerAddress, nil
 	}
 	if failedServer != currentServerAddress {
+		logrus.Debugf("lb.%s nextServer: direct return failed != current (current:%s)", lb.serviceName, lb.currentServerAddress)
 		return currentServerAddress, nil
 	}
 	if nextServerIndex >= len(lb.randomServers) {
@@ -140,6 +157,9 @@ func (lb *LoadBalancer) nextServer(failedServer string) (string, error) {
 
 	lb.currentServerAddress = currentServerAddress
 	lb.nextServerIndex = nextServerIndex
+
+	logrus.Debugf("nextServer %s: randomServers:%s, serverAddresses:%s [return:]currentServerAddress:%s nextServerIndex:%d",
+	            lb.serviceName, lb.randomServers, lb.ServerAddresses, lb.currentServerAddress, lb.nextServerIndex)
 
 	return currentServerAddress, nil
 }
@@ -199,12 +219,15 @@ func (sc *serverConn) Close() error {
 
 // SetDefault sets the selected address as the default / fallback address
 func (lb *LoadBalancer) SetDefault(serverAddress string) {
+	logrus.Debugf("lb.SetDefault for %s (before Lock): %s", lb.serviceName, serverAddress)
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
+	logrus.Debugf("lb.SetDefault for %s (after Lock): %s", lb.serviceName, serverAddress)
 
 	_, hasOriginalServer := sortServers(lb.ServerAddresses, lb.defaultServerAddress)
 	// if the old default server is not currently in use, remove it from the server map
 	if server := lb.servers[lb.defaultServerAddress]; server != nil && !hasOriginalServer {
+		logrus.Infof("lb.SetDefault for %s, serverAddress %s, trigger deferred closing of connections", lb.serviceName, serverAddress)
 		defer server.closeAll()
 		delete(lb.servers, lb.defaultServerAddress)
 	}
@@ -212,7 +235,10 @@ func (lb *LoadBalancer) SetDefault(serverAddress string) {
 	if _, ok := lb.servers[serverAddress]; !ok {
 		lb.servers[serverAddress] = &server{
 			address:     serverAddress,
-			healthCheck: func() bool { return true },
+			healthCheck: func() bool { 
+				logrus.Debugf("HC %s return true (from SetDefault)", serverAddress)
+				return true
+			},
 			connections: make(map[net.Conn]struct{}),
 		}
 	}
@@ -223,11 +249,13 @@ func (lb *LoadBalancer) SetDefault(serverAddress string) {
 
 // SetHealthCheck adds a health-check callback to an address, replacing the default no-op function.
 func (lb *LoadBalancer) SetHealthCheck(address string, healthCheck func() bool) {
+	logrus.Debugf("lb.SetHealthCheck for %s (before Lock): %s", lb.serviceName, address)
 	lb.mutex.Lock()
 	defer lb.mutex.Unlock()
+	logrus.Debugf("lb.SetHealthCheck for %s (after Lock): %s", lb.serviceName, address)
 
 	if server := lb.servers[address]; server != nil {
-		logrus.Debugf("Added health check for load balancer %s: %s", lb.serviceName, address)
+		logrus.Debugf("Added health check for load balancer %s: %s (hc:%v)", lb.serviceName, address, healthCheck)
 		server.healthCheck = healthCheck
 	} else {
 		logrus.Errorf("Failed to add health check for load balancer %s: no server found for %s", lb.serviceName, address)
@@ -247,6 +275,7 @@ func (lb *LoadBalancer) runHealthChecks(ctx context.Context) {
 				// Only close connections when the server transitions from healthy to unhealthy;
 				// we don't want to re-close all the connections every time as we might be ignoring
 				// health checks due to all servers being marked unhealthy.
+				logrus.Debugf("lb.runHealthChecks %s: failed health check for %s, closing connections", lb.serviceName, address)
 				defer server.closeAll()
 			}
 			previousStatus[address] = status

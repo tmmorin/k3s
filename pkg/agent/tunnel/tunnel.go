@@ -467,7 +467,9 @@ func (a *agentTunnel) connect(rootCtx context.Context, waitGroup *sync.WaitGroup
 
 	return agentConnection{
 		cancel:    cancel,
-		connected: func() bool { return connected },
+		connected: func() bool {
+			logrus.Debugf("HC connected test for %s (%t): %s", address, wsURL, connected)
+			return connected },
 	}
 }
 

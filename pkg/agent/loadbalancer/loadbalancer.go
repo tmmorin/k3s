@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
@@ -155,47 +156,64 @@ func (lb *LoadBalancer) LoadBalancerServerURL() string {
 }
 
 func (lb *LoadBalancer) dialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+    logrus.Debugf("dialContext lb.%s (before lock): currentServerAddress:%s", lb.serviceName, lb.currentServerAddress)
+	lockRequestTime := time.Now()
 	lb.mutex.RLock()
 	defer lb.mutex.RUnlock()
+	logrus.Debugf("dialContext lb.%s (after lock, locked during %s): currentServerAddress:%s", lb.serviceName, time.Since(lockRequestTime), lb.currentServerAddress)
 
 	var allChecksFailed bool
 	startIndex := lb.nextServerIndex
+	attempt := 0
 	for {
+		attempt++
+
 		targetServer := lb.currentServerAddress
+		logrus.Debugf("dialContext lb.%s (for loop, %d): nextServerIndex: %d, currentServerAddress:%s", lb.serviceName, attempt, lb.nextServerIndex, lb.currentServerAddress)
 
 		server := lb.servers[targetServer]
+		logrus.Debugf("dialContext lb.%s: server:%s", lb.serviceName, server.address)
 		if server == nil || targetServer == "" {
 			logrus.Debugf("Nil server for load balancer %s: %s", lb.serviceName, targetServer)
 		} else if allChecksFailed || server.healthCheck() {
+			logrus.Debugf("Connecting to server for load balancer %s: %s", lb.serviceName, targetServer)
 			conn, err := server.dialContext(ctx, network, targetServer)
 			if err == nil {
+				logrus.Debugf("Has connected toserver for load balancer %s: %s", lb.serviceName, targetServer)
 				return conn, nil
 			}
 			logrus.Debugf("Dial error from load balancer %s: %s", lb.serviceName, err)
 			// Don't close connections to the failed server if we're retrying with health checks ignored.
 			// We don't want to disrupt active connections if it is unlikely they will have anywhere to go.
 			if !allChecksFailed {
+				logrus.Debugf("not allFailed, closing connections to server (defered) for load balancer %s: %s", lb.serviceName, targetServer)
 				defer server.closeAll()
 			}
+		} else {
+			logrus.Debugf("lb.dialContext %s: won't use %s, try nextServer", lb.serviceName, server.address)
 		}
 
 		newServer, err := lb.nextServer(targetServer)
 		if err != nil {
+			logrus.Debugf("dialContext lb.%s: return on nextServer error")
 			return nil, err
 		}
 		if targetServer != newServer {
 			logrus.Debugf("Failed over to new server for load balancer %s: %s -> %s", lb.serviceName, targetServer, newServer)
 		}
 		if ctx.Err() != nil {
+			logrus.Debugf("dialContext lb.%s: return on ctx.Err")
 			return nil, ctx.Err()
 		}
 
 		maxIndex := len(lb.randomServers)
 		if startIndex > maxIndex {
+			logrus.Debugf("dialContext %s: looping list start>max", lb.serviceName)
 			startIndex = maxIndex
 		}
 		if lb.nextServerIndex == startIndex {
 			if allChecksFailed {
+				logrus.Debugf("dialContext lb.%s: return on allChecksFailed")
 				return nil, errors.New("all servers failed")
 			}
 			logrus.Debugf("Health checks for all servers in load balancer %s have failed: retrying with health checks ignored", lb.serviceName)

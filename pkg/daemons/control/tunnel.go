@@ -193,6 +193,7 @@ func (t *TunnelServer) serveConnect(resp http.ResponseWriter, req *http.Request)
 // denies the connection, or if there is some other error in actually dialing
 // the requested endpoint.
 func (t *TunnelServer) dialBackend(ctx context.Context, addr string) (net.Conn, error) {
+	logrus.Debugf("tunnel.dialBackend %s [enter]", addr)
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
